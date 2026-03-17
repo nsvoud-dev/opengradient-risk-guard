@@ -15,5 +15,8 @@ colorama>=0.4.6
 streamlit>=1.28.0
 plotly>=5.18.0
 
+# Local ONNX inference (Hybrid Mode fallback when on-chain inference is unavailable)
+onnxruntime>=1.17.0
+
 # Optional: for richer CLI
 readline; sys_platform != "win32"

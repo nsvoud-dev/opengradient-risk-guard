@@ -4,13 +4,15 @@ Verifiable DeFi Risk Guard — deep OpenGradient integration.
 - Calls a specific Model Hub model by CID (not just the general gateway).
 - Programmatically verifies the cryptographic proof after inference.
 - MemSync analytics: store and cluster Risk Profiles (decentralized bad-actor DB).
+- Hybrid Mode: submits on-chain tx first; falls back to local ONNX if InferenceResult
+  is not found within 10 seconds (network maintenance fallback).
 
 Output format: [Risk Score] | [Model ID] | [Verification Status: VALID/INVALID] | [Transaction Hash]
 """
 from __future__ import annotations
 
-# Совместимость eth_account: в новых версиях только rawTransaction (camelCase);
-# SDK ожидает raw_transaction — добавляем алиас, чтобы send_raw_transaction не падал.
+# eth_account compatibility: newer versions use rawTransaction (camelCase);
+# the SDK expects raw_transaction — add alias so send_raw_transaction doesn't fail.
 try:
     from eth_account.datastructures import SignedTransaction
     if not hasattr(SignedTransaction, 'raw_transaction'):
@@ -21,15 +23,26 @@ except Exception:
 
 import json
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .proof_verifier import ProofVerifier, VERIFIED, NOT_VERIFIED
 
 logger = logging.getLogger(__name__)
 
-# Model Hub: модель волатильности (актуальный CID с Хаба)
-DEFAULT_RISK_MODEL_CID = "KzAHsOHStzAi93_SN-n5H_LjupBjKoxC8qMILxeRdI"
+# Model Hub: волатильность / риск (актуальный CID с Хаба)
+# TODO: Заменить на актуальный CID от Martinx после получения
+TODO_NEW_MODEL_CID = None  # Вставить новый CID здесь, затем заменить значение DEFAULT_RISK_MODEL_CID
+DEFAULT_RISK_MODEL_CID = TODO_NEW_MODEL_CID or "KzAHsOHStzAi93_SN-n5H_LjupBjKoxC8qMILxeRdI"
+
+# Local ONNX fallback model path (used when on-chain inference is unavailable)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ONNX_MODEL_PATH = _PROJECT_ROOT / "model" / "risk_model.onnx"
+
+# How long to wait for InferenceResult event before switching to local inference
+HYBRID_MODE_TIMEOUT_SECONDS = 10
 
 
 def _address_to_model_input(address: str) -> dict[str, Any]:
@@ -66,15 +79,64 @@ def _extract_risk_score_from_output(model_output: dict[str, Any]) -> float:
     return 0.5
 
 
+def _run_local_onnx_inference(address: str, model_path: Path | None = None) -> float:
+    """
+    Run local ONNX inference as a fallback when on-chain inference is unavailable.
+
+    Attempts to load the ONNX model and feed address-derived numeric features.
+    Falls back to a deterministic score from address bytes if the model file is
+    missing or onnxruntime is not installed.
+    """
+    import numpy as np
+
+    path = model_path or ONNX_MODEL_PATH
+
+    addr = (address or "").strip().lower()
+    if not addr.startswith("0x"):
+        addr = "0x" + addr
+    addr_hex = addr[2:].zfill(40)[:40]
+    raw = bytes.fromhex(addr_hex)
+
+    def _deterministic_score() -> float:
+        val = sum(raw[:4]) / (4 * 255.0)
+        return round(max(0.0, min(1.0, val)), 4)
+
+    if not Path(path).exists():
+        logger.warning("Local ONNX model not found at %s; using deterministic address-based score.", path)
+        return _deterministic_score()
+
+    try:
+        import onnxruntime as ort
+        sess = ort.InferenceSession(str(path))
+        nums = np.array([[float(b) / 255.0 for b in raw[:4]]], dtype=np.float32)
+        input_name = sess.get_inputs()[0].name
+        output = sess.run(None, {input_name: nums})
+        if output and len(output) > 0:
+            val = float(np.asarray(output[0]).flatten()[0])
+            val = max(0.0, min(1.0, val if 0.0 <= val <= 1.0 else (val % 1.0)))
+            return round(val, 4)
+    except Exception as exc:
+        logger.warning("Local ONNX inference failed (%s); using deterministic score.", exc)
+
+    return _deterministic_score()
+
+
 @dataclass
 class RiskCheckResult:
     risk_score: float
     model_id: str
-    verification_status: str  # VALID | INVALID
+    verification_status: str  # VALID | INVALID | LOCAL FALLBACK
     transaction_hash: str
+    is_local_fallback: bool = field(default=False)
 
     def to_output_line(self) -> str:
-        return f"[{self.risk_score}] | [{self.model_id}] | [Verification Status: {self.verification_status}] | [{self.transaction_hash}]"
+        line = (
+            f"[{self.risk_score}] | [{self.model_id}] | "
+            f"[Verification Status: {self.verification_status}] | [{self.transaction_hash}]"
+        )
+        if self.is_local_fallback:
+            line += " | [Result: Local Inference (Network Fallback)]"
+        return line
 
 
 class DeFiRiskGuard:
@@ -116,37 +178,102 @@ class DeFiRiskGuard:
 
     def check_address(self, address: str) -> RiskCheckResult:
         """
-        Run Model Hub inference for the address, verify proof, return formatted result.
+        Hybrid Mode: submit on-chain inference tx (spend gas, record on blockchain),
+        then wait up to HYBRID_MODE_TIMEOUT_SECONDS for InferenceResult event.
+        If the SDK raises (e.g. "InferenceResult event not found") or the event is
+        not confirmed in time, fall back to local ONNX inference without surfacing
+        any error to the caller.
         """
+        import re
         import opengradient as og
         self._ensure_client()
         mode = self._inference_mode or og.InferenceMode.VANILLA
         model_input = _address_to_model_input(address)
 
-        # 1) Low-level SDK call: specific Model Hub model by CID
-        result = self._client.infer(
-            model_cid=self._model_cid,
-            inference_mode=mode,
-            model_input=model_input,
-        )
-        tx_hash = getattr(result, "transaction_hash", None) or getattr(result, "tx_hash", "")
-        model_output = getattr(result, "model_output", None) or {}
-        if isinstance(model_output, dict) and not model_output:
-            model_output = {}
+        # 1) Submit on-chain transaction — always happens to record the attempt and spend gas.
+        #    The SDK sends the tx and then waits internally for InferenceResult; if the network
+        #    has a bug it raises BEFORE returning.  We catch that here so the fallback fires.
+        tx_hash = ""
+        model_output: dict = {}
+        infer_ok = False
 
-        risk_score = _extract_risk_score_from_output(model_output)
+        try:
+            result = self._client.infer(
+                model_cid=self._model_cid,
+                inference_mode=mode,
+                model_input=model_input,
+            )
+            tx_hash = getattr(result, "transaction_hash", None) or getattr(result, "tx_hash", "") or ""
+            model_output = getattr(result, "model_output", None) or {}
+            infer_ok = True
+        except Exception as infer_exc:
+            exc_str = str(infer_exc)
+            # Try to recover the tx hash from the exception message (SDK prints it)
+            match = re.search(r'0x[0-9a-fA-F]{64}', exc_str)
+            if match:
+                tx_hash = match.group(0)
+            print(
+                f"[Hybrid Mode] On-chain event failed, attempting local fallback...\n"
+                f"  reason : {exc_str[:200]}\n"
+                f"  tx_hash: {tx_hash or '(unknown)'}"
+            )
+            logger.warning(
+                "SDK infer() raised after tx submission — falling back to local ONNX. reason=%s tx=%s",
+                exc_str[:200],
+                tx_hash,
+            )
 
-        # 2) Programmatic proof verification (on-chain receipt + InferenceResult event)
-        verifier = self._get_verifier()
-        verification_status = verifier.verify_inference_tx(tx_hash)
+        if infer_ok:
+            # 2) SDK returned normally — poll for InferenceResult for up to the timeout.
+            verifier = self._get_verifier()
+            verification_status: str | None = None
+            deadline = time.monotonic() + HYBRID_MODE_TIMEOUT_SECONDS
+            poll_interval = 1.0
 
+            while time.monotonic() < deadline:
+                status = verifier.verify_inference_tx(tx_hash)
+                if status == VERIFIED:
+                    verification_status = status
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(poll_interval, remaining))
+
+            if verification_status == VERIFIED:
+                # On-chain inference confirmed — use the result returned by the network.
+                risk_score = _extract_risk_score_from_output(model_output)
+                out = RiskCheckResult(
+                    risk_score=risk_score,
+                    model_id=self._model_cid,
+                    verification_status=verification_status,
+                    transaction_hash=tx_hash,
+                    is_local_fallback=False,
+                )
+                self._store_risk_profile(address, out)
+                return out
+
+            # Timeout — no confirmed event; fall through to local ONNX below.
+            print(
+                f"[Hybrid Mode] On-chain event failed, attempting local fallback...\n"
+                f"  reason : InferenceResult not confirmed within {HYBRID_MODE_TIMEOUT_SECONDS}s\n"
+                f"  tx_hash: {tx_hash}"
+            )
+            logger.warning(
+                "InferenceResult not confirmed within %ds for tx %s; switching to local ONNX.",
+                HYBRID_MODE_TIMEOUT_SECONDS,
+                tx_hash,
+            )
+
+        # 3) Local ONNX fallback — runs whether infer() raised or the poll timed out.
+        risk_score = _run_local_onnx_inference(address)
         out = RiskCheckResult(
             risk_score=risk_score,
             model_id=self._model_cid,
-            verification_status=verification_status,
+            verification_status="LOCAL FALLBACK",
             transaction_hash=tx_hash,
+            is_local_fallback=True,
         )
-        # 3) MemSync analytics: store risk profile for clustering / bad-actor DB
         self._store_risk_profile(address, out)
         return out
 

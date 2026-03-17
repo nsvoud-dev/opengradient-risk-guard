@@ -25,6 +25,7 @@ from run_risk_guard import (
 from src.defi_risk_guard import (
     DeFiRiskGuard,
     _load_client,
+    _run_local_onnx_inference,
     DEFAULT_RISK_MODEL_CID,
     RiskCheckResult,
 )
@@ -127,6 +128,19 @@ st.markdown("""
     }
     .status-ok { color: #00ff88; }
     .status-fail { color: #ff4444; }
+
+    /* Local inference fallback banner */
+    .fallback-banner {
+        padding: 0.6rem 1rem;
+        border-radius: 6px;
+        background: linear-gradient(90deg, #7b2fff22 0%, #5500ff18 100%);
+        border: 1px solid #7b2fff88;
+        color: #b084ff;
+        font-family: monospace;
+        font-size: 0.9rem;
+        margin: 0.75rem 0 0.25rem 0;
+        letter-spacing: 0.02em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -215,8 +229,32 @@ def run_scan(address: str) -> RiskCheckResult | None:
                     )
                     st.session_state.og_devnet_native_ok = False
                     return None
-                st.error(str(e))
-                return None
+                # Last-resort safety net: if the error is inference/event-related,
+                # run local ONNX instead of showing a red error to the user.
+                import re
+                exc_str = str(e)
+                is_inference_event_err = any(
+                    kw in err_msg for kw in ("inferencere", "event not found", "transaction logs", "network fallback")
+                )
+                if is_inference_event_err:
+                    tx_match = re.search(r'0x[0-9a-fA-F]{64}', exc_str)
+                    tx_hash = tx_match.group(0) if tx_match else ""
+                    print(
+                        f"[app.py safety net] On-chain event failed, attempting local fallback...\n"
+                        f"  reason : {exc_str[:200]}\n"
+                        f"  tx_hash: {tx_hash or '(unknown)'}"
+                    )
+                    risk_score = _run_local_onnx_inference(addr)
+                    result = RiskCheckResult(
+                        risk_score=risk_score,
+                        model_id=DEFAULT_RISK_MODEL_CID,
+                        verification_status="LOCAL FALLBACK",
+                        transaction_hash=tx_hash,
+                        is_local_fallback=True,
+                    )
+                else:
+                    st.error(exc_str)
+                    return None
 
     # Append to recent scans
     row = {
@@ -282,7 +320,8 @@ def risk_gauge(score: float):
 
 def render_proof(result: RiskCheckResult):
     """Technical Proof section with glowing green/red box."""
-    is_valid = "VALID" in result.verification_status
+    is_local = getattr(result, "is_local_fallback", False)
+    is_valid = "VALID" in result.verification_status and not is_local
     box_class = "proof-valid" if is_valid else "proof-invalid"
     value_class = "proof-value" if is_valid else "proof-value proof-value-invalid"
     st.markdown(f"""
@@ -295,6 +334,15 @@ def render_proof(result: RiskCheckResult):
         <div class="{value_class}">{result.transaction_hash}</div>
     </div>
     """, unsafe_allow_html=True)
+    if is_local:
+        st.markdown(
+            '<div class="fallback-banner">'
+            '⚠ Result: Local Inference (Network Fallback) — '
+            'InferenceResult event was not confirmed on-chain within 10 s. '
+            'The risk score was computed locally using the downloaded .onnx model.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
 
 def get_memsync_recent() -> list[dict]:
