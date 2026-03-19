@@ -197,6 +197,26 @@ class DeFiRiskGuard:
         model_output: dict = {}
         infer_ok = False
 
+        # Intercept send_raw_transaction at the web3 transport layer so we capture
+        # the tx hash at the exact moment the transaction is broadcast — before the
+        # SDK's internal InferenceResult wait, which may raise without including the
+        # hash in the exception message.
+        _captured: list[str] = []
+        _eth = self._client._blockchain.eth
+        _orig_send = _eth.send_raw_transaction
+
+        def _capturing_send(raw_tx):
+            receipt = _orig_send(raw_tx)
+            try:
+                h = receipt.hex() if isinstance(receipt, (bytes, bytearray)) else str(receipt)
+                if h and not h.startswith("0x"):
+                    h = "0x" + h
+                _captured.append(h)
+            except Exception:
+                pass
+            return receipt
+
+        _eth.send_raw_transaction = _capturing_send
         try:
             result = self._client.infer(
                 model_cid=self._model_cid,
@@ -204,24 +224,31 @@ class DeFiRiskGuard:
                 model_input=model_input,
             )
             tx_hash = getattr(result, "transaction_hash", None) or getattr(result, "tx_hash", "") or ""
+            if not tx_hash and _captured:
+                tx_hash = _captured[0]
             model_output = getattr(result, "model_output", None) or {}
             infer_ok = True
         except Exception as infer_exc:
             exc_str = str(infer_exc)
-            # Try to recover the tx hash from the exception message (SDK prints it)
-            match = re.search(r'0x[0-9a-fA-F]{64}', exc_str)
-            if match:
-                tx_hash = match.group(0)
+            # Primary source: hash captured by the interceptor before the SDK raised.
+            tx_hash = _captured[0] if _captured else ""
+            # Fallback: scan the exception message (works for some SDK versions).
+            if not tx_hash:
+                m = re.search(r'0x[0-9a-fA-F]{64}', exc_str)
+                if m:
+                    tx_hash = m.group(0)
             print(
                 f"[Hybrid Mode] On-chain event failed, attempting local fallback...\n"
-                f"  reason : {exc_str[:200]}\n"
-                f"  tx_hash: {tx_hash or '(unknown)'}"
+                f"  tx_hash: {tx_hash or '(unknown)'}\n"
+                f"  reason : {exc_str[:200]}"
             )
             logger.warning(
-                "SDK infer() raised after tx submission — falling back to local ONNX. reason=%s tx=%s",
-                exc_str[:200],
+                "SDK infer() raised after tx submission — falling back to local ONNX. tx=%s reason=%s",
                 tx_hash,
+                exc_str[:200],
             )
+        finally:
+            _eth.send_raw_transaction = _orig_send
 
         if infer_ok:
             # 2) SDK returned normally — poll for InferenceResult for up to the timeout.

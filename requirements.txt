@@ -12,18 +12,20 @@ web3>=6.0.0,<7.0.0
 eth-account>=0.8.0,<0.12.0
 
 # ── Numerics ──────────────────────────────────────────────────────────────────
-numpy>=1.21.0
+numpy>=1.21.0,<3.0.0
 
 # ── Local ONNX inference (Hybrid Mode fallback) ───────────────────────────────
-onnxruntime>=1.17.0
+# Tested on 1.24.3. Upper bound prevents silent API breakage on Cloud.
+onnxruntime>=1.17.0,<2.0.0
 
 # ── HTTP / env ────────────────────────────────────────────────────────────────
 requests>=2.28.0
 python-dotenv>=1.0.0
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
-streamlit>=1.28.0
-plotly>=5.18.0
+# Tested on 1.54.0. <2 guards against major breaking changes on Cloud.
+streamlit>=1.41.0,<2.0.0
+plotly>=5.18.0,<6.0.0
 
 # ── CLI cosmetics (local only, skipped on Cloud) ──────────────────────────────
 colorama>=0.4.6
