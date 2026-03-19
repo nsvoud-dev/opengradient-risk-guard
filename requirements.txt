@@ -1,22 +1,29 @@
-# OpenGradient ALPHA OG - Persistent AI Agent
-# Core SDK and LangChain integration
+# Verifiable DeFi Risk Guard — Streamlit Cloud & local requirements
+
+# ── OpenGradient SDK ──────────────────────────────────────────────────────────
 opengradient>=0.4.7,<0.5.0
+
+# ── LangChain integration (agent layer) ──────────────────────────────────────
 langchain-opengradient>=0.1.2
 langchain-core>=0.3.15,<0.4.0
 
-# HTTP and env
+# ── Web3 / blockchain ─────────────────────────────────────────────────────────
+web3>=6.0.0,<7.0.0
+eth-account>=0.8.0,<0.12.0
+
+# ── Numerics ──────────────────────────────────────────────────────────────────
+numpy>=1.21.0
+
+# ── Local ONNX inference (Hybrid Mode fallback) ───────────────────────────────
+onnxruntime>=1.17.0
+
+# ── HTTP / env ────────────────────────────────────────────────────────────────
 requests>=2.28.0
 python-dotenv>=1.0.0
 
-# CLI colors (Windows-safe)
-colorama>=0.4.6
-
-# Dashboard (Streamlit)
+# ── Dashboard ─────────────────────────────────────────────────────────────────
 streamlit>=1.28.0
 plotly>=5.18.0
 
-# Local ONNX inference (Hybrid Mode fallback when on-chain inference is unavailable)
-onnxruntime>=1.17.0
-
-# Optional: for richer CLI
-readline; sys_platform != "win32"
+# ── CLI cosmetics (local only, skipped on Cloud) ──────────────────────────────
+colorama>=0.4.6

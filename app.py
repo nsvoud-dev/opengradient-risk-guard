@@ -7,6 +7,7 @@ Hybrid Mode: Demo when balance is 0, Live when funded.
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,36 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
+
+# ── Streamlit Cloud: inject secrets into os.environ ───────────────────────────
+# Must run before any src.* import so that src/config.py (which reads os.environ)
+# already sees the cloud secrets when it is first loaded.
+def _bootstrap_cloud_secrets() -> None:
+    """
+    On Streamlit Cloud, secrets live in st.secrets (configured via the app dashboard).
+    Copy each key into os.environ so the rest of the codebase (config.py, load_dotenv)
+    works without any changes — os.environ is the single source of truth at runtime.
+    Locally this is a no-op: the keys will already be set by .env / the shell.
+    """
+    _KEYS = (
+        "OPENGRADIENT_PRIVATE_KEY",
+        "OPENGRADIENT_RPC_URL",
+        "OPENGRADIENT_CHAIN_ID",
+        "MEMSYNC_API_KEY",
+        "AGENT_ID",
+        "DEFAULT_THREAD_ID",
+    )
+    try:
+        for key in _KEYS:
+            if key in st.secrets and not os.environ.get(key):
+                os.environ[key] = str(st.secrets[key])
+    except Exception:
+        # st.secrets is unavailable outside Streamlit Cloud / local secrets.toml — ignore.
+        pass
+
+_bootstrap_cloud_secrets()
+# ─────────────────────────────────────────────────────────────────────────────
+
 import plotly.graph_objects as go
 
 from run_risk_guard import (
