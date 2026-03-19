@@ -1,31 +1,30 @@
-# Verifiable DeFi Risk Guard — Streamlit Cloud & local requirements
+# ── Verifiable DeFi Risk Guard — Streamlit Cloud requirements ─────────────────
+#
+# Rules applied:
+#  • opengradient is listed first — heaviest dep tree, sets the baseline.
+#  • web3 and eth-account are NOT pinned: opengradient==0.4.14 requires
+#    eth-account>=0.13.4, pinning 0.11.0 causes ResolutionImpossible on Cloud.
+#    Let pip resolve them as transitive dependencies.
+#  • numpy capped <2.0.0 — numpy 2.x breaks SDK internals.
+#  • No Windows-only packages (colorama, readline, pywin32 removed).
 
 # ── OpenGradient SDK ──────────────────────────────────────────────────────────
-opengradient>=0.4.7,<0.5.0
+opengradient==0.4.14
 
-# ── LangChain integration (agent layer) ──────────────────────────────────────
-langchain-opengradient>=0.1.2
-langchain-core>=0.3.15,<0.4.0
+# ── LangChain integration ─────────────────────────────────────────────────────
+langchain-opengradient==0.1.2
+langchain-core==0.3.83
 
-# ── Web3 / blockchain ─────────────────────────────────────────────────────────
-web3>=6.0.0,<7.0.0
-eth-account>=0.8.0,<0.12.0
-
-# ── Numerics ──────────────────────────────────────────────────────────────────
-numpy>=1.21.0,<3.0.0
+# ── Numerics — capped <2.0.0; numpy 2.x breaks SDK internals ─────────────────
+numpy>=1.21.6,<2.0.0
 
 # ── Local ONNX inference (Hybrid Mode fallback) ───────────────────────────────
-# Tested on 1.24.3. Upper bound prevents silent API breakage on Cloud.
-onnxruntime>=1.17.0,<2.0.0
+onnxruntime==1.24.3
 
-# ── HTTP / env ────────────────────────────────────────────────────────────────
-requests>=2.28.0
-python-dotenv>=1.0.0
+# ── HTTP / environment ────────────────────────────────────────────────────────
+requests==2.32.5
+python-dotenv==1.0.1
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
-# Tested on 1.54.0. <2 guards against major breaking changes on Cloud.
-streamlit>=1.41.0,<2.0.0
-plotly>=5.18.0,<6.0.0
-
-# ── CLI cosmetics (local only, skipped on Cloud) ──────────────────────────────
-colorama>=0.4.6
+streamlit==1.54.0
+plotly==6.5.2
